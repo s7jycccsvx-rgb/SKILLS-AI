@@ -485,6 +485,22 @@ onkeydown="if(event.key==='Enter')qaAsk()">
 </div>
 <div id="qaChips" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;"></div>
 </div>
+<div class="card" style="padding:14px;margin-bottom:14px;">
+<button onclick="togglePhotoCheck()" style="width:100%;padding:13px;border:1.5px dashed var(--accent);border-radius:12px;background:var(--accent-tint,#f4f1fb);color:var(--accent);font-weight:800;font-size:14px;cursor:pointer;font-family:inherit;">📷 写真で明度チェック（β）</button>
+<div id="photoPanel" class="hide" style="margin-top:12px;">
+<div style="font-size:11.5px;color:var(--muted);line-height:1.7;margin-bottom:10px;">髪の写真を選び、<b>髪の部分を1〜3カ所タップ</b>してから診断してください。写真は端末内で処理され、どこにも送信されません。自然光・明るい室内での撮影が正確です。</div>
+<input type="file" id="photoInput" accept="image/*" onchange="photoLoad(event)" style="width:100%;font-size:13px;margin-bottom:10px;">
+<div style="position:relative;">
+<canvas id="photoCanvas" style="width:100%;border-radius:12px;display:none;cursor:crosshair;"></canvas>
+</div>
+<div id="photoHint" style="font-size:11.5px;color:var(--muted);margin:8px 0;"></div>
+<div style="display:flex;gap:8px;">
+<button onclick="photoReset()" style="flex:1;padding:11px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--muted);font-weight:700;font-size:12.5px;cursor:pointer;font-family:inherit;">やり直す</button>
+<button onclick="photoDiagnose()" style="flex:2;padding:11px;border:none;border-radius:10px;background:var(--accent);color:#fff;font-weight:800;font-size:13px;cursor:pointer;font-family:inherit;">SAITO AIが診断する</button>
+</div>
+<div id="photoResult" style="margin-top:12px;"></div>
+</div>
+</div>
 <div id="qaLog"></div>
 <div class="disclaim">※ このQ&Aは端末内のデータだけで動く簡易検索です。薬剤の使用は必ずメーカーの使用方法・注意書きを優先してください。</div>
 </div>
@@ -2758,6 +2774,119 @@ ${ansHtml}`;
 log.prepend(block);
 inp.value='';
 }
+
+/* ============ 写真で明度チェック（端末内処理） ============ */
+let phImg=null, phSamples=[], phWB=1;
+function togglePhotoCheck(){ document.getElementById('photoPanel').classList.toggle('hide'); }
+function photoReset(){ phSamples=[]; document.getElementById('photoResult').innerHTML=''; if(phImg) phDraw(); phHint(); }
+function phHint(){ const h=document.getElementById('photoHint'); if(!phImg){h.textContent='';return;} h.textContent = phSamples.length? `髪サンプル ${phSamples.length}/3 カ所 ── 追加タップ可。よければ「診断する」へ` : '↑ 写真の中の髪の部分をタップしてください（1〜3カ所）'; }
+function photoLoad(ev){
+  const f=ev.target.files&&ev.target.files[0]; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=e=>{ const im=new Image(); im.onload=()=>{ phImg=im; phSamples=[]; phSetup(); }; im.src=e.target.result; };
+  rd.readAsDataURL(f);
+}
+function phSetup(){
+  const cv=document.getElementById('photoCanvas');
+  const maxw=900; const sc=Math.min(1,maxw/phImg.width);
+  cv.width=Math.round(phImg.width*sc); cv.height=Math.round(phImg.height*sc);
+  cv.style.display='block';
+  phDraw();
+  // 自動ホワイトバランス: 上位1%輝度を基準白に
+  const ctx=cv.getContext('2d');
+  const d=ctx.getImageData(0,0,cv.width,cv.height).data;
+  const lum=[];
+  for(let i=0;i<d.length;i+=40){ lum.push(0.299*d[i]+0.587*d[i+1]+0.114*d[i+2]); }
+  lum.sort((a,b)=>a-b);
+  const p99=lum[Math.floor(lum.length*0.99)]||245;
+  phWB=Math.max(0.85,Math.min(2.0,245/Math.max(60,p99)));
+  cv.onclick=phTap;
+  document.getElementById('photoResult').innerHTML='';
+  phHint();
+}
+function phDraw(){
+  const cv=document.getElementById('photoCanvas'); const ctx=cv.getContext('2d');
+  ctx.drawImage(phImg,0,0,cv.width,cv.height);
+  ctx.lineWidth=4;
+  phSamples.forEach((p,i)=>{ ctx.strokeStyle='#584a9c'; ctx.beginPath(); ctx.arc(p.x,p.y,16,0,7); ctx.stroke(); ctx.fillStyle='#584a9c'; ctx.font='bold 15px sans-serif'; ctx.fillText(String(i+1), p.x-4, p.y-22); });
+}
+function phTap(ev){
+  if(!phImg) return;
+  const cv=document.getElementById('photoCanvas'); const r=cv.getBoundingClientRect();
+  const x=Math.round((ev.clientX-r.left)*cv.width/r.width), y=Math.round((ev.clientY-r.top)*cv.height/r.height);
+  if(phSamples.length>=3) phSamples.shift();
+  phSamples.push({x,y}); phDraw(); phHint();
+}
+function srgb2lab(r,g,b){
+  const f=v=>{v/=255; return v<=0.04045? v/12.92 : Math.pow((v+0.055)/1.055,2.4);};
+  const R=f(r),G=f(g),B=f(b);
+  let X=(R*0.4124+G*0.3576+B*0.1805)/0.95047, Y=R*0.2126+G*0.7152+B*0.0722, Z=(R*0.0193+G*0.1192+B*0.9505)/1.08883;
+  const g2=t=>t>0.008856? Math.cbrt(t) : (7.787*t+16/116);
+  X=g2(X); Y=g2(Y); Z=g2(Z);
+  return {L:116*Y-16, a:500*(X-Y), b:200*(Y-Z)};
+}
+function photoDiagnose(){
+  const out=document.getElementById('photoResult');
+  if(!phImg){ out.innerHTML='<div class="placeholder">まず写真を選んでください。</div>'; return; }
+  if(!phSamples.length){ out.innerHTML='<div class="placeholder">写真の髪の部分をタップしてから診断してください。</div>'; return; }
+  const cv=document.getElementById('photoCanvas'); const ctx=cv.getContext('2d');
+  let R=0,G=0,B=0,n=0;
+  for(const p of phSamples){
+    const s=12;
+    const img=ctx.getImageData(Math.max(0,p.x-s),Math.max(0,p.y-s),s*2,s*2).data;
+    for(let i=0;i<img.length;i+=4){ R+=img[i];G+=img[i+1];B+=img[i+2];n++; }
+  }
+  R=Math.min(255,R/n*phWB); G=Math.min(255,G/n*phWB); B=Math.min(255,B/n*phWB);
+  const lab=srgb2lab(R,G,B);
+  // 明度→レベル推定
+  let est,lvIdx;
+  if(lab.L>=83){est='18.5〜19Lv（ホワイト域）';lvIdx=0;}
+  else if(lab.L>=75){est='18Lv前後（ペールイエロー域）';lvIdx=1;}
+  else if(lab.L>=65){est='17Lv前後（イエロー域）';lvIdx=2;}
+  else if(lab.L>=52){est='15〜16Lv（黄〜オレンジ域）';lvIdx=3;}
+  else if(lab.L>=35){est='13Lv以下（オレンジ残留域）';lvIdx=4;}
+  else {est='地毛〜暗髪（〜10Lv）';lvIdx=5;}
+  // 色みの判定
+  let tone, toneQ;
+  if(lab.b>=26&&lab.a>=13){tone='オレンジみが強め';toneQ='ピンクの残留ティントを抜きたい';}
+  else if(lab.b>=24){tone='黄ばみ強め';toneQ='黄ばみを消したい';}
+  else if(lab.b>=12){tone='黄みあり';toneQ='黄ばみを消したい';}
+  else if(lab.b<=4&&lab.L>=70){tone='ほぼニュートラル（黄み少）';toneQ='';}
+  else {tone='ニュートラル〜くすみ';toneQ='';}
+  // アドバイス
+  const adv=[
+    'ホワイト・淡色系オンカラーが乗せられる土台です。'+(lab.b>=12?'仕上げに紫の補色で黄みを整えると◎':''),
+    '白系を狙うなら紫補色でカバー、もしくはあと半歩リフト。ベージュ〜ミルクティーは好相性。',
+    'ムラサキ補色でベージュ・ミルクティー圏。ホワイト系はもう1回のリフトを検討。',
+    '寒色・淡色狙いはリフト継続。カラー履歴があるなら残留ティントの確認も。',
+    '全頭ブリーチの目安：黒髪から1回で14〜15Lv。オレンジが残る場合は塗布ムラ・履歴もチェック。',
+    '黒髪〜暗髪。1回のブリーチで14〜15Lvが目安。狙う色から逆算して回数を設計。',
+  ][lvIdx];
+  const relBtns = [`<button onclick="phGoNavi(${lvIdx})" style="margin:8px 6px 0 0;padding:8px 14px;border:1px solid var(--accent);border-radius:99px;background:#fff;color:var(--accent);font-weight:700;font-size:11.5px;cursor:pointer;font-family:inherit;">配合ナビでこのレベルのレシピを見る →</button>`]
+    .concat(toneQ?[`<button onclick="document.getElementById('qaInput').value='${toneQ}';qaAsk();" style="margin:8px 0 0;padding:8px 14px;border:1px solid var(--accent);border-radius:99px;background:#fff;color:var(--accent);font-weight:700;font-size:11.5px;cursor:pointer;font-family:inherit;">SAITO AIに「${toneQ}」と聞く</button>`]:[]).join('');
+  out.innerHTML=`<div class="case"><div class="case-band" style="background:var(--accent)"></div>
+    <div class="case-body" style="padding:14px 16px;">
+      <div style="display:flex;align-items:center;gap:7px;margin-bottom:8px;">
+        <span style="width:26px;height:26px;border-radius:50%;background:var(--accent);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;">S</span>
+        <span style="font-size:11.5px;font-weight:800;color:var(--accent);letter-spacing:.05em;">SAITO AI 写真診断</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+        <span style="width:44px;height:44px;border-radius:10px;border:1px solid var(--line);background:rgb(${Math.round(R)},${Math.round(G)},${Math.round(B)});"></span>
+        <div><div style="font-size:15px;font-weight:900;">推定明度：${est}</div>
+        <div style="font-size:12px;color:var(--muted);">色みの傾向：${tone}</div></div>
+      </div>
+      <div style="font-size:12.5px;line-height:1.8;">${adv}</div>
+      ${relBtns}
+      <div style="font-size:10.5px;color:var(--muted);margin-top:10px;">※ 照明・画質により±1〜2Lvの誤差があります。最終判断は必ず目視と毛束テストで。</div>
+    </div></div>`;
+}
+function phGoNavi(idx){
+  const el=document.querySelectorAll('#levels .lvl')[idx];
+  if(el) el.click();
+  switchTab('navi');
+}
+window.togglePhotoCheck=togglePhotoCheck; window.photoLoad=photoLoad; window.photoReset=photoReset; window.photoDiagnose=photoDiagnose; window.phGoNavi=phGoNavi;
+
 window.qaAsk=qaAsk;
 
 /* init */
